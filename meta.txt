@@ -1,0 +1,91 @@
+import pandas as pd
+import numpy as np
+import emcee
+from scipy.special import expit as logistic
+
+#load data
+data = 
+data['Study'] = data['Study'] - 1
+
+data['Sensitivity'] = data['TP'] / data['Dis']
+data['Specificity'] = data['TN'] / data['NDis']
+data['DOR'] = (data['TP'] * data['TN']) / ((data['Dis'] - data['TP']) * (data['NDis'] - data['TN']))
+data['OR'] = (data['TP'] / (data['Dis'] - data['TP'])) / (data['TN'] / (data['NDis'] - data['TN']))
+
+
+def log_prior(theta):
+    sigma_sens = theta[1]
+    sigma_spec = theta[3]
+    if sigma_sens <= 0 or sigma_spec <= 0:
+        return -np.inf
+    return -0.5 * np.sum(theta**2)
+
+
+def log_likelihood(theta, Dis, TP, NDis, TN, unique_studies, Study):
+    mu_sens, sigma_sens, mu_spec, sigma_spec = theta[:4]
+    study_effects_sens = theta[4:4+unique_studies]
+    study_effects_spec = theta[4+unique_studies:]
+
+    prob_sens = logistic(study_effects_sens[Study])
+    prob_spec = logistic(study_effects_spec[Study])
+
+    ll_sens = TP * np.log(prob_sens) + (Dis - TP) * np.log(1 - prob_sens)
+    ll_spec = TN * np.log(prob_spec) + (NDis - TN) * np.log(1 - prob_spec)
+
+    return np.sum(ll_sens + ll_spec)
+
+def log_posterior(theta, Dis, TP, NDis, TN, unique_studies, Study):
+    return log_prior(theta) + log_likelihood(theta, Dis, TP, NDis, TN, unique_studies, Study)
+
+unique_studies = len(data['Study'].unique())
+initial_state = np.random.rand(unique_studies * 2 + 4)
+ndim = len(initial_state)
+nwalkers = 50
+
+sampler = emcee.EnsembleSampler(nwalkers, ndim, log_posterior, args=[data['Dis'].values, data['TP'].values, data['NDis'].values, data['TN'].values, unique_studies, data['Study'].values])
+p0 = np.array([initial_state + 0.01 * np.random.randn(ndim) for i in range(nwalkers)])
+state = sampler.run_mcmc(p0, 2000)
+
+
+samples = sampler.get_chain(discard= , thin= , flat= )
+
+n_samples = samples.shape[0]
+
+# 为Relative_Sensitivity和Relative_Specificity分配空间
+relative_sens_samples = np.zeros((n_samples, unique_studies))
+relative_spec_samples = np.zeros((n_samples, unique_studies))
+
+# 对于每个样本计算Relative_Sensitivity和Relative_Specificity
+for i, theta in enumerate(samples):
+    study_effects_sens = logistic(theta[4:4+unique_studies])
+    study_effects_spec = logistic(theta[4+unique_studies:])
+    avg_sens = np.mean(study_effects_sens)
+    avg_spec = np.mean(study_effects_spec)
+    relative_sens_samples[i] = study_effects_sens / avg_sens
+    relative_spec_samples[i] = study_effects_spec / avg_spec
+
+metrics = ["Sensitivity", "Specificity", "DOR", "OR"]
+results = {}
+for test in data['Test'].unique():
+    filtered_data = data[data['Test'] == test]
+    results[test] = {}
+    for metric in metrics:
+        values = filtered_data[metric].values
+        mean_value = np.mean(values)
+        lower_bound = np.percentile(values, 2.5)
+        upper_bound = np.percentile(values, 97.5)
+        results[test][metric] = (mean_value, lower_bound, upper_bound)
+
+for test, metrics_results in results.items():
+    print(f"\nResults for Test: {test}")
+    for metric, (mean, lb, ub) in metrics_results.items():
+        print(f"{metric} - 平均值: {mean:.3f}, 95% CI: ({lb:.3f}, {ub:.3f})")
+comparison_groups = [(1, 2), (1, 3)]
+for group in comparison_groups:
+    print(f"\nComparison between Test {group[0]} and Test {group[1]}:")
+    for metric in metrics:
+        diff_mean = results[group[0]][metric][0] - results[group[1]][metric][0]
+        diff_lb = results[group[0]][metric][1] - results[group[1]][metric][2]
+        diff_ub = results[group[0]][metric][2] - results[group[1]][metric][1]
+        print(f"Difference in {metric} - 平均值: {diff_mean:.3f}, 95% CI: ({diff_lb:.3f}, {diff_ub:.3f})")
+
